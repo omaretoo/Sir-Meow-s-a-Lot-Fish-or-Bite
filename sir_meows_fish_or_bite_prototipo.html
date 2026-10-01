@@ -1,0 +1,244 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Sir Meows-a-Lot: Fish or Bite</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#17152b;color:white;font-family:system-ui,Arial,sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}
+  #wrap{width:min(1100px,100vw);padding:12px}
+  #hud{display:flex;gap:18px;align-items:center;flex-wrap:wrap;background:#282448;border:3px solid #5c4d89;border-radius:14px 14px 0 0;padding:10px 14px;font-weight:800}
+  #game{position:relative;width:100%;aspect-ratio:16/9;overflow:hidden;background:#8ed8ff;border:3px solid #5c4d89;border-top:0}
+  canvas{width:100%;height:100%;display:block;image-rendering:pixelated}
+  #help{text-align:center;color:#c9c5df;font-size:14px;margin-top:8px}
+  .pill{padding:4px 9px;background:#3a3260;border-radius:999px}
+  #message{position:absolute;inset:0;display:none;align-items:center;justify-content:center;background:#17152baa;font-size:30px;font-weight:900;text-align:center}
+  #message div{background:#282448;border:3px solid #8d78c8;border-radius:18px;padding:24px}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="hud">
+    <span class="pill">❤️ <span id="lives">9</span></span>
+    <span class="pill">🐟 <span id="fish">0</span></span>
+    <span class="pill">⭐ <span id="score">0</span></span>
+    <span class="pill" id="status">FISH OR BITE!</span>
+  </div>
+  <div id="game">
+    <canvas id="c" width="1280" height="720"></canvas>
+    <div id="message"><div id="messageText"></div></div>
+  </div>
+  <div id="help">← → / A D: mover · ESPACIO/W: doble salto · J/X: morder · R: reiniciar</div>
+</div>
+
+<script>
+const canvas=document.getElementById("c"),ctx=canvas.getContext("2d");
+const W=1280,H=720;
+const keys={};
+let lives=9, fish=0, score=0, gameOver=false, won=false;
+let camera=0, biteTimer=0, invuln=0, catnip=0, shield=0;
+const gravity=.65, worldW=4300;
+
+addEventListener("keydown",e=>{
+  keys[e.key.toLowerCase()]=true;
+  if([" ","arrowleft","arrowright","arrowup"].includes(e.key.toLowerCase())) e.preventDefault();
+  if(e.key.toLowerCase()==="r") reset();
+});
+addEventListener("keyup",e=>keys[e.key.toLowerCase()]=false);
+
+const player={
+  x:100,y:500,w:54,h:60,vx:0,vy:0,onGround:false,jumps:0,dir:1
+};
+
+const platforms=[
+ [0,620,800,100],[900,620,850,100],[1850,620,900,100],[2850,620,1450,100],
+ [120,520,180,25],[390,450,180,25],[680,350,170,25],
+ [980,500,190,25],[1270,420,180,25],[1500,330,190,25],
+ [1880,500,180,25],[2200,410,190,25],[2500,320,180,25],
+ [2900,500,220,25],[3300,400,220,25],[3650,300,230,25]
+];
+
+const fishItems=[
+ [170,470],[445,400],[735,300],[1040,450],[1320,370],[1550,280],
+ [1930,450],[2260,360],[2550,270],[2980,450],[3380,350],[3720,250],
+ [4100,550]
+].map(([x,y])=>({x,y,r:14,taken:false}));
+
+const enemies=[
+ {type:"vacuum",x:580,y:560,w:70,h:60,vx:1.5},
+ {type:"dog",x:1120,y:555,w:58,h:65,vx:1.2,patrol:[980,1450]},
+ {type:"vacuum",x:2050,y:560,w:70,h:60,vx:1.8},
+ {type:"dog",x:3020,y:555,w:58,h:65,vx:1.5,patrol:[2900,3400]},
+ {type:"vacuum",x:3500,y:560,w:70,h:60,vx:2}
+];
+
+const objects=[
+ {x:250,y:570,w:35,h:45,hit:false},{x:620,y:570,w:35,h:45,hit:false},
+ {x:1180,y:570,w:35,h:45,hit:false},{x:1980,y:570,w:35,h:45,hit:false},
+ {x:3150,y:570,w:35,h:45,hit:false}
+];
+
+function reset(){
+ lives=9;fish=0;score=0;gameOver=false;won=false;camera=0;biteTimer=0;invuln=0;catnip=0;shield=0;
+ Object.assign(player,{x:100,y:500,vx:0,vy:0,jumps:0});
+ fishItems.forEach(f=>f.taken=false); enemies.forEach((e,i)=>e.dead=false);
+ objects.forEach(o=>o.hit=false);
+ document.getElementById("message").style.display="none";
+}
+
+function rects(a,b){return a.x<a.x+a.w && a.x+a.w>b.x && a.y<a.y+a.h && a.y+a.h>b.y}
+function overlap(a,b){return a.x<b.x+b.w&&a.x+a.w>b.x&&a.y<b.y+b.h&&a.y+a.h>b.y}
+
+function hurt(){
+ if(invuln>0||gameOver)return;
+ if(shield>0){shield=0; invuln=80; return;}
+ lives--; invuln=100; player.vx=-player.dir*6; player.vy=-8;
+ if(lives<=0){gameOver=true;showMessage("GAME OVER<br><small>This time, you didn't land on your feet.</small><br><br>Press R");}
+}
+
+function showMessage(t){document.getElementById("messageText").innerHTML=t;document.getElementById("message").style.display="flex"}
+
+function update(){
+ if(gameOver||won)return;
+
+ const left=keys["arrowleft"]||keys["a"], right=keys["arrowright"]||keys["d"];
+ player.vx=(right?1:0)-(left?1:0);
+ if(player.vx)player.dir=player.vx;
+ player.vx*=3.8+(catnip?2:0);
+
+ if((keys[" "]||keys["w"]||keys["arrowup"]) && !keys._jump){
+   if(player.onGround||player.jumps<2){player.vy=-12;player.jumps++;player.onGround=false;}
+ }
+ keys._jump=keys[" "]||keys["w"]||keys["arrowup"];
+
+ if(keys["j"]||keys["x"]){biteTimer=12;}
+ if(biteTimer>0)biteTimer--;
+ if(invuln>0)invuln--; if(catnip>0)catnip--; 
+
+ player.vy+=gravity; player.x+=player.vx; player.y+=player.vy;
+ player.x=Math.max(0,Math.min(worldW-player.w,player.x));
+
+ player.onGround=false;
+ for(const p of platforms){
+   if(player.x+player.w>p[0]&&player.x<p[0]+p[2]&&player.y+player.h>=p[1]&&player.y+player.h<=p[1]+18&&player.vy>=0){
+     player.y=p[1]-player.h;player.vy=0;player.onGround=true;player.jumps=0;
+   }
+ }
+
+ if(player.y>760){hurt();player.x=Math.max(100,player.x-250);player.y=400;player.vy=0;}
+
+ for(const f of fishItems){
+   if(!f.taken && Math.hypot((player.x+27)-f.x,(player.y+25)-f.y)<38){
+     f.taken=true;fish++;score+=10;
+     if(fish%100===0)lives++;
+   }
+ }
+ for(const o of objects){
+   if(!o.hit && biteTimer>0 && overlap({x:player.x+(player.dir>0?45:-35),y:player.y+15,w:40,h:30},o)){
+     o.hit=true;score+=25;
+   }
+ }
+ for(const e of enemies){
+   if(e.dead)continue;
+   if(e.type==="vacuum"){e.x+=e.vx;if(e.x<500||e.x>760)e.vx*=-1;}
+   else {e.x+=e.vx;if(e.x<e.patrol[0]||e.x>e.patrol[1])e.vx*=-1;}
+   const eb={x:e.x,y:e.y,w:e.w,h:e.h};
+   const mouth={x:player.x+(player.dir>0?45:-38),y:player.y+14,w:42,h:34};
+   if(biteTimer>0 && e.type==="dog" && overlap(mouth,eb)){e.dead=true;score+=50;}
+   else if(overlap(player,eb)){hurt();}
+ }
+ // power-ups: catnip and tuna represented as glowing treats at fixed spots
+ if(player.x>1700&&player.x<1780){catnip=300;score+=50;}
+ if(player.x>2700&&player.x<2780){shield=1;score+=50;}
+
+ if(player.x>4040){won=true;showMessage("🥣 CUENCO INFINITO<br><small>¡Has recuperado "+fish+" peces!</small><br><br>Press R para volver a jugar");}
+
+ camera=Math.max(0,Math.min(worldW-W,player.x-330));
+ document.getElementById("lives").textContent=lives;
+ document.getElementById("fish").textContent=fish;
+ document.getElementById("score").textContent=score;
+ document.getElementById("status").textContent=catnip?"🌿 CATNIP POWER!":shield?"🥫 TUNA SHIELD":"FISH OR BITE!";
+}
+
+function draw(){
+ ctx.clearRect(0,0,W,H);
+ // sky / kitchen
+ ctx.fillStyle="#8ed8ff";ctx.fillRect(0,0,W,H);
+ ctx.fillStyle="#f6dfb4";ctx.fillRect(0,430,W,290);
+ ctx.fillStyle="#d4a86a";ctx.fillRect(0,610,W,110);
+
+ // background shelves / kitchen decor
+ ctx.save();ctx.translate(-camera*.35,0);
+ for(let x=0;x<worldW;x+=420){
+   ctx.fillStyle="#a96e4b";ctx.fillRect(x,90,300,24);
+   ctx.fillStyle="#8a583e";ctx.fillRect(x,114,14,300);ctx.fillRect(x+286,114,14,300);
+ }
+ ctx.restore();
+
+ ctx.save();ctx.translate(-camera,0);
+ // platforms
+ for(const p of platforms){
+   ctx.fillStyle="#6e4934";ctx.fillRect(p[0],p[1],p[2],p[3]);
+   ctx.fillStyle="#8fc65b";ctx.fillRect(p[0],p[1],p[2],10);
+ }
+ // fish
+ for(const f of fishItems)if(!f.taken){
+   ctx.fillStyle="#ff9f35";ctx.beginPath();ctx.ellipse(f.x,f.y,16,10,0,0,Math.PI*2);ctx.fill();
+   ctx.fillStyle="#ffd76a";ctx.beginPath();ctx.moveTo(f.x-12,f.y);ctx.lineTo(f.x-25,f.y-10);ctx.lineTo(f.x-25,f.y+10);ctx.fill();
+   ctx.fillStyle="#17152b";ctx.fillRect(f.x+6,f.y-3,3,3);
+ }
+ // objects
+ for(const o of objects)if(!o.hit){
+   ctx.fillStyle="#cf6f8e";ctx.fillRect(o.x,o.y,o.w,o.h);
+   ctx.fillStyle="#f5b0c2";ctx.fillRect(o.x+7,o.y+7,o.w-14,8);
+ }
+ // enemies
+ for(const e of enemies)if(!e.dead){
+   if(e.type==="vacuum"){
+     ctx.fillStyle="#594e73";ctx.fillRect(e.x,e.y+15,e.w,e.h-15);
+     ctx.fillStyle="#342e49";ctx.fillRect(e.x+8,e.y,e.w-16,25);
+     ctx.fillStyle="#ffcc42";ctx.fillRect(e.x+18,e.y+8,10,7);
+     ctx.fillStyle="#222";ctx.fillRect(e.x+8,e.y+52,12,10);ctx.fillRect(e.x+50,e.y+52,12,10);
+   }else{
+     ctx.fillStyle="#a86b43";ctx.fillRect(e.x+8,e.y+20,42,42);
+     ctx.fillStyle="#7d4b31";ctx.beginPath();ctx.moveTo(e.x+10,e.y+25);ctx.lineTo(e.x,e.y);ctx.lineTo(e.x+22,e.y+18);ctx.fill();
+     ctx.beginPath();ctx.moveTo(e.x+48,e.y+25);ctx.lineTo(e.x+58,e.y);ctx.lineTo(e.x+36,e.y+18);ctx.fill();
+     ctx.fillStyle="#17152b";ctx.fillRect(e.x+18,e.y+30,5,5);ctx.fillRect(e.x+38,e.y+30,5,5);
+     ctx.fillStyle="#e85b5b";ctx.fillRect(e.x+25,e.y+45,12,5);
+   }
+ }
+ // power-up hints
+ if(player.x>1660&&player.x<1840){ctx.font="bold 18px system-ui";ctx.fillStyle="#4c2d80";ctx.fillText("🌿 HIERBA GATERA",1680,270);}
+ if(player.x>2660&&player.x<2840){ctx.font="bold 18px system-ui";ctx.fillStyle="#7a4a20";ctx.fillText("🥫 LATA DE ATÚN",2670,270);}
+ // goal bowl
+ ctx.fillStyle="#e9e1ef";ctx.beginPath();ctx.ellipse(4140,590,90,38,0,0,Math.PI*2);ctx.fill();
+ ctx.fillStyle="#c2a9d6";ctx.fillRect(4050,590,180,50);
+ ctx.fillStyle="#ff9f35";ctx.font="bold 24px system-ui";ctx.fillText("FISH",4090,602);
+
+ // player
+ const flash=invuln>0&&Math.floor(invuln/6)%2===0;
+ if(!flash){
+   ctx.fillStyle=shield?"#f5d37a":"#b8b8c9";ctx.fillRect(player.x,player.y+18,54,40);
+   ctx.fillStyle="#e6b7a2";ctx.fillRect(player.x+9,player.y,38,36);
+   // ears
+   ctx.fillStyle="#e6b7a2";ctx.beginPath();ctx.moveTo(player.x+10,player.y+8);ctx.lineTo(player.x+5,player.y-14);ctx.lineTo(player.x+23,player.y+3);ctx.fill();
+   ctx.beginPath();ctx.moveTo(player.x+43,player.y+8);ctx.lineTo(player.x+50,player.y-14);ctx.lineTo(player.x+31,player.y+3);ctx.fill();
+   ctx.fillStyle="#17152b";ctx.fillRect(player.x+17,player.y+13,5,5);ctx.fillRect(player.x+34,player.y+13,5,5);
+   ctx.fillStyle="#f2b4b4";ctx.fillRect(player.x+25,player.y+21,7,5);
+   // tiny sword
+   ctx.fillStyle="#e9e9ee";ctx.fillRect(player.x+(player.dir>0?43:-8),player.y+40,28,5);
+   // bite bubble
+   if(biteTimer>0){ctx.fillStyle="#fff";ctx.font="bold 24px system-ui";ctx.fillText("CHOMP!",player.x-5,player.y-25);}
+ }
+ ctx.restore();
+
+ // title
+ ctx.fillStyle="#282448";ctx.font="900 26px system-ui";ctx.fillText("SIR MEOWS-A-LOT",22,38);
+}
+
+function loop(){update();draw();requestAnimationFrame(loop)}
+reset();loop();
+</script>
+</body>
+</html>
